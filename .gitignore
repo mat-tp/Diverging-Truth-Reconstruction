@@ -1,0 +1,30 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+# LaTeX build products
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.synctex.gz
+
+# any zipped files
+*.zip
+
+# data: too large for git; keep folders only
+data/raw/*
+data/processed/*
+data/outputs/*
+data/synthetic/
+data/ADFIR_forensic_dataset/*
+!data/*/.gitkeep
+docs/references/_large_untracked/
+
+docs/
+
+# I might reconsider tracking these later
+/tests/
+**/tests/
