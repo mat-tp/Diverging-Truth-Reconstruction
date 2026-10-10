@@ -7,6 +7,7 @@ corroborated is "program X was run/touched at time T".
 from __future__ import annotations
 import glob, os, re
 import pandas as pd
+import numpy as np
 
 FAMILIES = ["registry", "execution", "eventlog", "filesystem", "filefolder", "deletion"]
 COLS = ["family", "artifact", "ts", "user", "key", "attack"]
@@ -112,5 +113,30 @@ def load_case(case_dir: str, case_name: str | None = None) -> pd.DataFrame:
             if len(part):
                 frames.append(part)
     out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=COLS)
+    # Windows.old copies / repeated RECmd batches emit the same record more than once
+    out = out.drop_duplicates(["family", "artifact", "ts", "key", "user"]).reset_index(drop=True)
     out["case"] = case_name or os.path.basename(os.path.normpath(case_dir))
     return out
+
+
+def family_offset_report(events: pd.DataFrame, max_gap: float = 86400.0, min_n: int = 20) -> dict:
+    """DIAGNOSTIC for clock drift / time-zone mismatch between source families.
+
+    For every program seen by two families, take each timestamp of family A and its nearest timestamp in
+    family B; keep signed gaps within +-max_gap. A median far from 0 (e.g. +-3600*k) points at a systematic
+    offset; a median near 0 means the sources already agree and no drift correction is needed.
+    """
+    acc: dict[tuple[str, str], list] = {}
+    for _, g in events.groupby(["case", "key"], sort=False):
+        ts = {f: np.sort(x["ts"].to_numpy()) for f, x in g.groupby("family")}
+        for i, a in enumerate(FAMILIES):
+            for b in FAMILIES[i + 1:]:
+                if a in ts and b in ts:
+                    ta, tb = ts[a], ts[b]
+                    idx = np.clip(np.searchsorted(tb, ta), 1, len(tb) - 1) if len(tb) > 1 else np.zeros(len(ta), int)
+                    cand = np.stack([tb[np.clip(idx - 1, 0, len(tb) - 1)], tb[idx]])
+                    near = cand[np.abs(cand - ta).argmin(axis=0), np.arange(len(ta))]
+                    d = near - ta
+                    acc.setdefault((a, b), []).extend(d[np.abs(d) <= max_gap].tolist())
+    return {f"{a}->{b}": {"n": len(v), "median_offset_s": float(np.median(v))}
+            for (a, b), v in acc.items() if len(v) >= min_n}

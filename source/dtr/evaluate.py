@@ -30,3 +30,35 @@ def temporal_report(err_seconds) -> dict:
     return {"n": int(len(e)), "mae_s": float(e.mean()), "median_s": float(np.median(e)),
             "within_1min": float((e <= 60).mean()), "within_5min": float((e <= 300).mean()),
             "within_1h": float((e <= 3600).mean())}
+
+
+def tune_threshold(y, proba, grid=None) -> float:
+    """Threshold maximising F1 on (y, proba). Call it on VALIDATION data only - tuning on the test
+    case leaks the test labels into the reported score."""
+    grid = np.linspace(0.05, 0.95, 91) if grid is None else grid
+    best, best_f1 = 0.5, -1.0
+    for t in grid:
+        f1 = classification_report(y, (np.asarray(proba) >= t).astype(int))["f1"]
+        if f1 > best_f1:
+            best, best_f1 = float(t), f1
+    return best
+
+
+def recall_by_offset(offsets, flagged) -> dict:
+    """Recall of tampered groups, bucketed by how far the clock was shifted (seconds)."""
+    off, fl = np.abs(np.asarray(offsets, float)), np.asarray(flagged, int)
+    edges = [(0, 600, "<10min"), (600, 3600, "10min-1h"), (3600, 86400, "1h-1d"), (86400, np.inf, ">1d")]
+    out = {}
+    for lo, hi, name in edges:
+        m = (off >= lo) & (off < hi)
+        out[name] = {"n": int(m.sum()), "recall": float(fl[m].mean()) if m.any() else None}
+    return out
+
+
+def effort_reduction_report(raw_count: int, grouped_count: int) -> dict:
+    """Raw executable-related events vs evidence groups. This is a COMPRESSION ratio, not a measured
+    saving in investigator effort (single-source programs are not in any group)."""
+    if raw_count == 0:
+        return {"raw_events": 0, "evidence_groups": 0, "compression_percentage": 0.0}
+    return {"raw_events": int(raw_count), "evidence_groups": int(grouped_count),
+            "compression_percentage": round((raw_count - grouped_count) / raw_count * 100, 2)}
