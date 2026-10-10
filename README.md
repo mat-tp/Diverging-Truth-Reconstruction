@@ -83,4 +83,15 @@ Natural gaps between artifacts differ strongly between cases (e.g. eventlog→fi
     python -m dtr.main run                       # raw features
     python -m dtr.main run --normalise --seeds 5
 
-Notes: on real data only three families (eventlog, filesystem, execution) carry substantial volume; execution↔eventlog agree to under 1 s in every case, so clock-drift correction appears unnecessary. Random Forest vs Logistic Regression results are mixed. Normalisation is validated on a controlled synthetic case (AUC 0.51 → 0.94) but not yet on real data.
+Real-data result (5 cases, LOCO, fixed 0.5 threshold; normalised = 5 seeds, raw = 1 seed):
+
+| features | model | F1 | ROC-AUC |
+|---|---|---|---|
+| raw | RF | 0.829 | 0.821 |
+| raw | LR | 0.761 | 0.867 |
+| normalised | RF | 0.796 ± 0.013 | 0.851 ± 0.008 |
+| normalised | LR | 0.754 ± 0.018 | 0.834 ± 0.008 |
+
+Normalisation fixes the Magnet 2022 collapse for RF (AUC 0.51 → 0.76–0.79) but lowers RF AUC on NIST and DC and lowers LR AUC overall, so the effect is mixed, not an improvement. A one-feature gap_max baseline reaches AUC ≈0.85 on average with normalisation and beats RF on NIST and Desktop, so the ML models do not clearly outperform it. All labels are synthetic (injected shifts).
+
+Notes: on real data only three families (eventlog, filesystem, execution) carry substantial volume; execution↔eventlog agree to under 1 s in every case, so clock-drift correction appears unnecessary.
