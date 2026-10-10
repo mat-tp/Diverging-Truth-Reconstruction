@@ -75,3 +75,12 @@ Outputs in `data/outputs/`: `metrics.json` (per case + macro average, incl. per-
 ## References
 
 1. Sokol et al., ADFIR forensic dataset, Data in Brief / Mendeley Data. <https://www.sciencedirect.com/science/article/pii/S2352340924006607>
+
+## Per-case normalisation and multiple seeds
+
+Natural gaps between artifacts differ strongly between cases (e.g. eventlog→filesystem median offset ≈2 s in the DC image vs ≈2334 s in Magnet 2022), which breaks raw-gap features under leave-one-case-out. `--normalise` converts gap/span features to robust z-scores using each case's own untampered data (no labels). `--seeds N` repeats tamper injection and reports mean ± sd.
+
+    python -m dtr.main run                       # raw features
+    python -m dtr.main run --normalise --seeds 5
+
+Notes: on real data only three families (eventlog, filesystem, execution) carry substantial volume; execution↔eventlog agree to under 1 s in every case, so clock-drift correction appears unnecessary. Random Forest vs Logistic Regression results are mixed. Normalisation is validated on a controlled synthetic case (AUC 0.51 → 0.94) but not yet on real data.

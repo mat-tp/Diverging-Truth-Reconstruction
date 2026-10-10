@@ -44,13 +44,57 @@ def tamper(group: dict, rng: np.random.Generator) -> dict:
     g["true_time"] = consensus_time(group["ts"])[0]
     return g
 
-def features(group: dict) -> np.ndarray:
+MIN_BASELINE_N = 10
+MIN_SCALE = 0.5  # log-seconds; stops a very tight pair from exploding into huge z-scores
+
+
+def _robust_stats(vals) -> tuple[float, float]:
+    v = np.asarray(vals, float)
+    if len(v) == 0:
+        return 0.0, 1.0
+    med = float(np.median(v))
+    return med, max(1.4826 * float(np.median(np.abs(v - med))), MIN_SCALE)
+
+
+def compute_baselines(groups: list[dict]) -> dict:
+    """Natural (untampered) gap statistics of ONE case, per family pair and for the group span.
+
+    Different cases have very different natural disagreement between artifacts (e.g. the median
+    event-log -> filesystem offset is ~2 s in one case and ~2,300 s in another). A model that sees raw
+    gaps mistakes a noisy case for a tampered one, so gap features can be expressed as robust z-scores
+    against the case's own baseline. Uses no labels: call it on the groups BEFORE tampering is injected.
+    Pairs seen in fewer than MIN_BASELINE_N groups fall back to the pooled statistics of the case.
+    """
+    per_pair: dict = {p: [] for p in PAIRS}
+    spans, pooled = [], []
+    for g in groups:
+        ts = g["ts"]
+        allt = np.concatenate(list(ts.values()))
+        spans.append(np.log1p(allt.max() - allt.min()))
+        for a, b in PAIRS:
+            if a in ts and b in ts:
+                v = np.log1p(pair_gap(ts[a], ts[b]))
+                per_pair[(a, b)].append(v)
+                pooled.append(v)
+    fallback = _robust_stats(pooled)
+    out = {p: (_robust_stats(v) if len(v) >= MIN_BASELINE_N else fallback) for p, v in per_pair.items()}
+    out["span"] = _robust_stats(spans)
+    return out
+
+
+def features(group: dict, baseline: dict | None = None) -> np.ndarray:
+    """Feature vector for one group. With `baseline` (from compute_baselines) the gap and span
+    features are robust z-scores against the case's natural distribution instead of raw log-seconds."""
     ts = group["ts"]
     fams = [f for f in FAMILIES if f in ts]
     gaps = {}
     for a, b in PAIRS:
         if a in ts and b in ts:
-            gaps[(a, b)] = np.log1p(pair_gap(ts[a], ts[b]))
+            v = np.log1p(pair_gap(ts[a], ts[b]))
+            if baseline is not None:
+                med, scale = baseline[(a, b)]
+                v = (v - med) / scale
+            gaps[(a, b)] = v
     vals = np.array(list(gaps.values()))
     allt = np.concatenate(list(ts.values()))
     users = group["users"]
@@ -60,7 +104,10 @@ def features(group: dict) -> np.ndarray:
     else:
         agree, n_users = 1.0, 0
     fill = vals.mean() if len(vals) > 0 else 0.0
-    row = [len(fams), np.log1p(len(allt)), np.log1p(allt.max() - allt.min()),
+    span = np.log1p(allt.max() - allt.min())
+    if baseline is not None:
+        span = (span - baseline["span"][0]) / baseline["span"][1]
+    row = [len(fams), np.log1p(len(allt)), span,
            vals.min() if len(gaps) else 0.0, 
            vals.mean() if len(gaps) else 0.0, 
            vals.max() if len(gaps) else 0.0, 
@@ -68,8 +115,18 @@ def features(group: dict) -> np.ndarray:
     row += [gaps.get(p, fill) for p in PAIRS]
     return np.array(row, dtype=float)
 
-def make_dataset(groups: list[dict], tamper_frac: float = 0.5, seed: int = 0):
-    """Return X, y (1 = tampered / conflicting), and the (possibly tampered) groups."""
+def make_dataset(groups: list[dict], tamper_frac: float = 0.5, seed: int = 0, normalise: bool = False):
+    """Return X, y (1 = tampered / conflicting), and the (possibly tampered) groups.
+
+    normalise=True expresses gap/span features relative to each case's own untampered baseline
+    (computed per case, before any tampering is injected, so it uses no labels).
+    """
+    baselines = {}
+    if normalise:
+        by_case: dict = {}
+        for g in groups:
+            by_case.setdefault(g["case"], []).append(g)
+        baselines = {c: compute_baselines(gs) for c, gs in by_case.items()}
     rng = np.random.default_rng(seed)
     out, y = [], []
     for g in groups:
@@ -81,5 +138,6 @@ def make_dataset(groups: list[dict], tamper_frac: float = 0.5, seed: int = 0):
             g2["true_time"] = consensus_time(g["ts"])[0]
             out.append(g2)
             y.append(0)
-    X = np.stack([features(g) for g in out]) if out else np.zeros((0, len(FEATURE_NAMES)))
+    X = (np.stack([features(g, baselines.get(g["case"])) for g in out])
+         if out else np.zeros((0, len(FEATURE_NAMES))))
     return X, np.array(y, dtype=int), out

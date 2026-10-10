@@ -34,29 +34,29 @@ def fit_models(X, y, seed):
     return lr, rf
 
 
-def validation_thresholds(groups, train_cases, seed):
+def validation_thresholds(groups, train_cases, seed, normalise=False):
     """Pick one threshold per model on a validation CASE taken from the training cases (largest one),
     fitting on the remaining training cases. The test case is never touched."""
     val = max(train_cases, key=lambda c: len(groups[c]))
     fit_g = [g for c in train_cases if c != val for g in groups[c]]
     if len(fit_g) < MIN_GROUPS or len(groups[val]) < MIN_GROUPS:
         return {m: 0.5 for m in MODELS}, None
-    Xf, yf, _ = make_dataset(fit_g, seed=seed)
-    Xv, yv, _ = make_dataset(groups[val], seed=seed + 2)
+    Xf, yf, _ = make_dataset(fit_g, seed=seed, normalise=normalise)
+    Xv, yv, _ = make_dataset(groups[val], seed=seed + 2, normalise=normalise)
     lr, rf = fit_models(Xf, yf, seed)
     return {"logistic_regression_scratch": tune_threshold(yv, lr.predict_proba(Xv)),
             "random_forest": tune_threshold(yv, rf.predict_proba(Xv)[:, 1])}, val
 
 
-def evaluate_fold(groups, holdout, raw_events, seed, threshold, tune):
+def evaluate_fold(groups, holdout, raw_events, seed, threshold, tune, normalise=False):
     train_cases = [c for c in groups if c != holdout]
     train_g = [g for c in train_cases for g in groups[c]]
     thr, val_case = ({m: threshold for m in MODELS}, None)
     if tune:
-        thr, val_case = validation_thresholds(groups, train_cases, seed)
+        thr, val_case = validation_thresholds(groups, train_cases, seed, normalise)
 
-    Xtr, ytr, _ = make_dataset(train_g, seed=seed)
-    Xte, yte, gte = make_dataset(groups[holdout], seed=seed + 1)
+    Xtr, ytr, _ = make_dataset(train_g, seed=seed, normalise=normalise)
+    Xte, yte, gte = make_dataset(groups[holdout], seed=seed + 1, normalise=normalise)
     lr, rf = fit_models(Xtr, ytr, seed)
     p_lr, p_rf = lr.predict_proba(Xte), rf.predict_proba(Xte)[:, 1]
     flag_lr, flag_rf = (p_lr >= thr[MODELS[0]]).astype(int), (p_rf >= thr[MODELS[1]]).astype(int)
@@ -91,7 +91,25 @@ def evaluate_fold(groups, holdout, raw_events, seed, threshold, tune):
     return m, preds, timeline(gte, p_rf, threshold=thr[MODELS[1]]), lr.loss_history
 
 
-def run(data_dir, out_dir, holdout="all", threshold=0.5, tune=False, seed=0, min_families=2) -> dict:
+def run_folds(groups, raw_events, folds, seed, threshold, tune, normalise):
+    per_case, preds_all, tl_all, losses = {}, [], [], {}
+    for h in folds:
+        m, preds, tl, loss = evaluate_fold(groups, h, raw_events[h], seed, threshold, tune, normalise)
+        per_case[h] = m
+        preds_all.append(preds); tl_all.append(tl.assign(case=h)); losses[h] = loss
+        print(f"[seed {seed}][fold {h}] RF f1={m[MODELS[1]]['f1']:.3f} auc={m[MODELS[1]].get('roc_auc', float('nan')):.3f} | "
+              f"LR f1={m[MODELS[0]]['f1']:.3f} auc={m[MODELS[0]].get('roc_auc', float('nan')):.3f} | "
+              f"gap_max-only auc={m['baseline_gap_max_roc_auc']:.3f}")
+    return per_case, preds_all, tl_all, losses
+
+
+def macro_average(per_case, folds):
+    return {k: {s: float(np.mean([per_case[c][k][s] for c in folds if s in per_case[c][k]])) for s in SCORES}
+            for k in MODELS}
+
+
+def run(data_dir, out_dir, holdout="all", threshold=0.5, tune=False, seed=0, min_families=2,
+        normalise=False, n_seeds=1) -> dict:
     os.makedirs(out_dir, exist_ok=True)
     cases = sorted(d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d)))
     if not cases:
@@ -109,23 +127,20 @@ def run(data_dir, out_dir, holdout="all", threshold=0.5, tune=False, seed=0, min
         raise SystemExit(f"holdout {holdout!r} not in {cases}")
     for c in set(cases) - set(usable):
         print(f"[warn] {c}: only {len(groups[c])} groups - used for training only, not as a test case")
+    if sum(len(groups[c]) for c in cases if c not in folds[:1]) < MIN_GROUPS:
+        raise SystemExit("not enough training groups")
 
-    per_case, preds_all, tl_all, losses = {}, [], [], {}
-    for h in folds:
-        if sum(len(groups[c]) for c in cases if c != h) < MIN_GROUPS:
-            raise SystemExit("not enough training groups")
-        m, preds, tl, loss = evaluate_fold(groups, h, raw_events[h], seed, threshold, tune)
-        per_case[h] = m
-        preds_all.append(preds); tl_all.append(tl.assign(case=h)); losses[h] = loss
-        print(f"[fold {h}] RF f1={m[MODELS[1]]['f1']:.3f} auc={m[MODELS[1]].get('roc_auc', float('nan')):.3f} | "
-              f"LR f1={m[MODELS[0]]['f1']:.3f} auc={m[MODELS[0]].get('roc_auc', float('nan')):.3f} | "
-              f"gap_max-only auc={m['baseline_gap_max_roc_auc']:.3f}")
-
-    macro = {k: {s: float(np.mean([per_case[c][k][s] for c in folds if s in per_case[c][k]])) for s in SCORES}
-             for k in MODELS}
+    # the tampering is random, so one seed is one draw: repeat to see how much results move
+    runs = [run_folds(groups, raw_events, folds, seed + i, threshold, tune, normalise) for i in range(n_seeds)]
+    per_case, preds_all, tl_all, losses = runs[0]          # files below come from the first seed
+    macros = [macro_average(r[0], folds) for r in runs]
+    summary = {k: {s: {"mean": float(np.mean([m[k][s] for m in macros])),
+                       "sd": float(np.std([m[k][s] for m in macros]))} for s in SCORES} for k in MODELS}
     metrics = {"protocol": "leave-one-case-out" if holdout == "all" else f"holdout={holdout}",
                "threshold_mode": "tuned on a validation case" if tune else f"fixed {threshold}",
-               "cases": folds, "macro_average": macro, "per_case": per_case, "family_offsets": offsets}
+               "features": "per-case normalised (robust z-scores)" if normalise else "raw log-seconds",
+               "cases": folds, "n_seeds": n_seeds, "macro_average": macros[0], "macro_over_seeds": summary,
+               "per_case": per_case, "family_offsets": offsets}
     json.dump(metrics, open(os.path.join(out_dir, "metrics.json"), "w"), indent=2)
     pd.concat(preds_all).to_csv(os.path.join(out_dir, "predictions.csv"), index=False)
     pd.concat(tl_all).to_csv(os.path.join(out_dir, "reconstructed_timeline.csv"), index=False)
@@ -147,14 +162,17 @@ def main():
     r.add_argument("--threshold", type=float, default=0.5, help="fixed decision threshold")
     r.add_argument("--tune-threshold", action="store_true", help="tune it on a validation case instead")
     r.add_argument("--seed", type=int, default=0)
+    r.add_argument("--seeds", type=int, default=1, help="repeat with this many consecutive seeds, report mean +- sd")
+    r.add_argument("--normalise", action="store_true", help="express gap features relative to each case's own baseline")
     a = ap.parse_args()
     if a.cmd == "synth":
         from .synth import make_dataset_dir
         make_dataset_dir(a.out, a.programs)
         print("wrote", a.out)
     else:
-        res = run(a.data, a.out, a.holdout, a.threshold, a.tune_threshold, a.seed)
-        print(json.dumps({k: res[k] for k in ("protocol", "threshold_mode", "macro_average")}, indent=2))
+        res = run(a.data, a.out, a.holdout, a.threshold, a.tune_threshold, a.seed,
+                  normalise=a.normalise, n_seeds=a.seeds)
+        print(json.dumps({k: res[k] for k in ("protocol", "features", "threshold_mode", "n_seeds", "macro_over_seeds")}, indent=2))
 
 
 if __name__ == "__main__":
