@@ -20,6 +20,7 @@ data/processed/*
 data/outputs/*
 data/synthetic/
 data/ADFIR_forensic_dataset/*
+data/ADFIR forensic dataset/
 !data/*/.gitkeep
 docs/references/_large_untracked/
 
@@ -28,3 +29,5 @@ docs/
 # I might reconsider tracking these later
 /tests/
 **/tests/
+
+todos.txt
