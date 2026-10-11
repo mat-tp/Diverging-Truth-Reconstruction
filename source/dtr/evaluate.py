@@ -62,3 +62,22 @@ def effort_reduction_report(raw_count: int, grouped_count: int) -> dict:
         return {"raw_events": 0, "evidence_groups": 0, "compression_percentage": 0.0}
     return {"raw_events": int(raw_count), "evidence_groups": int(grouped_count),
             "compression_percentage": round((raw_count - grouped_count) / raw_count * 100, 2)}
+
+
+
+def review_effort(y, scores, target: float = 0.9) -> dict:
+    """How many evidence groups must be reviewed to find `target` of the tampered ones?
+
+    Ranked: groups are read in descending conflict probability. Raw: groups are read in an uninformed order
+    (expected value target * N). This counts groups, not minutes: no analyst time is measured here.
+    """
+    y, s = np.asarray(y), np.asarray(scores)
+    n, pos = len(y), int(y.sum())
+    if pos == 0:
+        return {"n_groups": n, "n_tampered": 0, "ranked_reviews": None, "raw_expected_reviews": None, "saving": None}
+    order = np.argsort(-s, kind="stable")
+    found = np.cumsum(y[order])
+    need = int(np.searchsorted(found, int(np.ceil(target * pos))) + 1)
+    raw = target * n
+    return {"n_groups": n, "n_tampered": pos, "target_recall": target, "ranked_reviews": need,
+            "raw_expected_reviews": float(raw), "saving": float(1 - need / raw)}

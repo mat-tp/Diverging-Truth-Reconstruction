@@ -13,7 +13,7 @@ from .ingest import load_case, family_offset_report
 from .groups import build_groups, make_dataset, FEATURE_NAMES
 from .models import LogisticRegressionScratch
 from .evaluate import (classification_report, effort_reduction_report, recall_by_offset,
-                       temporal_report, tune_threshold)
+                       review_effort, temporal_report, tune_threshold)
 from .reconstruct import reconcile, timeline, outlier_family
 
 REPO = Path(__file__).resolve().parents[2]
@@ -85,22 +85,36 @@ def evaluate_fold(groups, holdout, raw_events, seed, threshold, tune, normalise=
             hit += outlier_family(g["ts"]) == g["tampered_family"]
     m["temporal_naive"], m["temporal_reconciled"] = temporal_report(naive), temporal_report(aware)
     m["tampered_source_identified_3plus"] = {"n": n3, "accuracy": hit / n3 if n3 else None}
+    m["review_effort_rf"] = review_effort(yte, p_rf)
     m["rf_top_features"] = [(n, round(float(v), 4)) for n, v in
                             sorted(zip(FEATURE_NAMES, rf.feature_importances_), key=lambda x: -x[1])[:8]]
     preds = pd.DataFrame({"case": holdout, "key": [g["key"] for g in gte], "truth": yte, "p_lr": p_lr, "p_rf": p_rf})
-    return m, preds, timeline(gte, p_rf, threshold=thr[MODELS[1]]), lr.loss_history
+    # the same trained model applied to the REAL, untampered groups: this is the timeline an investigator would
+    # see, and the one to compare with published case write-ups (the tampered one above is synthetic)
+    Xr, _, gr = make_dataset(groups[holdout], tamper_frac=0.0, seed=seed, normalise=normalise)
+    p_real = rf.predict_proba(Xr)[:, 1]
+    real_tl = timeline(gr, p_real, threshold=thr[MODELS[1]]).assign(case=holdout)
+    evidence = group_evidence(gr, holdout)
+    return m, preds, timeline(gte, p_rf, threshold=thr[MODELS[1]]), lr.loss_history, real_tl, evidence
+
+
+def group_evidence(groups, case, max_per_family=50) -> pd.DataFrame:
+    """Per-source timestamps of each real group (capped), for the evidence explorer."""
+    rows = [(case, g["key"], f, float(t)) for g in groups for f, v in g["ts"].items() for t in v[:max_per_family]]
+    return pd.DataFrame(rows, columns=["case", "key", "family", "ts"])
 
 
 def run_folds(groups, raw_events, folds, seed, threshold, tune, normalise):
-    per_case, preds_all, tl_all, losses = {}, [], [], {}
+    per_case, preds_all, tl_all, losses, real_all, ev_all = {}, [], [], {}, [], []
     for h in folds:
-        m, preds, tl, loss = evaluate_fold(groups, h, raw_events[h], seed, threshold, tune, normalise)
+        m, preds, tl, loss, real_tl, ev = evaluate_fold(groups, h, raw_events[h], seed, threshold, tune, normalise)
         per_case[h] = m
         preds_all.append(preds); tl_all.append(tl.assign(case=h)); losses[h] = loss
+        real_all.append(real_tl); ev_all.append(ev)
         print(f"[seed {seed}][fold {h}] RF f1={m[MODELS[1]]['f1']:.3f} auc={m[MODELS[1]].get('roc_auc', float('nan')):.3f} | "
               f"LR f1={m[MODELS[0]]['f1']:.3f} auc={m[MODELS[0]].get('roc_auc', float('nan')):.3f} | "
               f"gap_max-only auc={m['baseline_gap_max_roc_auc']:.3f}")
-    return per_case, preds_all, tl_all, losses
+    return per_case, preds_all, tl_all, losses, real_all, ev_all
 
 
 def macro_average(per_case, folds):
@@ -132,7 +146,7 @@ def run(data_dir, out_dir, holdout="all", threshold=0.5, tune=False, seed=0, min
 
     # the tampering is random, so one seed is one draw: repeat to see how much results move
     runs = [run_folds(groups, raw_events, folds, seed + i, threshold, tune, normalise) for i in range(n_seeds)]
-    per_case, preds_all, tl_all, losses = runs[0]          # files below come from the first seed
+    per_case, preds_all, tl_all, losses, real_all, ev_all = runs[0]          # files below come from the first seed
     macros = [macro_average(r[0], folds) for r in runs]
     summary = {k: {s: {"mean": float(np.mean([m[k][s] for m in macros])),
                        "sd": float(np.std([m[k][s] for m in macros]))} for s in SCORES} for k in MODELS}
@@ -144,6 +158,8 @@ def run(data_dir, out_dir, holdout="all", threshold=0.5, tune=False, seed=0, min
     json.dump(metrics, open(os.path.join(out_dir, "metrics.json"), "w"), indent=2)
     pd.concat(preds_all).to_csv(os.path.join(out_dir, "predictions.csv"), index=False)
     pd.concat(tl_all).to_csv(os.path.join(out_dir, "reconstructed_timeline.csv"), index=False)
+    pd.concat(real_all).to_csv(os.path.join(out_dir, "real_timeline.csv"), index=False)
+    pd.concat(ev_all).to_csv(os.path.join(out_dir, "group_evidence.csv"), index=False)
     pd.DataFrame(dict(((c, pd.Series(v)) for c, v in losses.items()))).rename_axis("iteration").reset_index() \
         .to_csv(os.path.join(out_dir, "loss_history.csv"), index=False)
     return metrics
@@ -164,8 +180,15 @@ def main():
     r.add_argument("--seed", type=int, default=0)
     r.add_argument("--seeds", type=int, default=1, help="repeat with this many consecutive seeds, report mean +- sd")
     r.add_argument("--normalise", action="store_true", help="express gap features relative to each case's own baseline")
+    d = sub.add_parser("drift", help="anchor-event clock-drift recovery experiment on the real cases")
+    d.add_argument("--data", default=str(DEFAULT_DATA))
+    d.add_argument("--out", default=str(DEFAULT_OUT))
     a = ap.parse_args()
-    if a.cmd == "synth":
+    if a.cmd == "drift":
+        from .drift import run_drift_experiment
+        res = run_drift_experiment(a.data, a.out)
+        print(res.groupby("injected_s")["abs_error_s"].median().to_string())
+    elif a.cmd == "synth":
         from .synth import make_dataset_dir
         make_dataset_dir(a.out, a.programs)
         print("wrote", a.out)

@@ -4,3 +4,5 @@ scikit-learn
 matplotlib
 pytest
 seaborn
+streamlit>=1.50
+plotly

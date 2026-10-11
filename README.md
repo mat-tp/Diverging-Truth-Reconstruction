@@ -95,3 +95,19 @@ Real-data result (5 cases, LOCO, fixed 0.5 threshold; normalised = 5 seeds, raw 
 Normalisation fixes the Magnet 2022 collapse for RF (AUC 0.51 → 0.76–0.79) but lowers RF AUC on NIST and DC and lowers LR AUC overall, so the effect is mixed, not an improvement. A one-feature gap_max baseline reaches AUC ≈0.85 on average with normalisation and beats RF on NIST and Desktop, so the ML models do not clearly outperform it. All labels are synthetic (injected shifts).
 
 Notes: on real data only three families (eventlog, filesystem, execution) carry substantial volume; execution↔eventlog agree to under 1 s in every case, so clock-drift correction appears unnecessary.
+
+## Presentation app, drift experiment, write-up validation
+
+    cd source
+    python -m dtr.main run --seeds 5            # also writes real_timeline.csv and group_evidence.csv
+    python -m dtr.main drift                    # anchor-event clock-drift recovery -> drift_experiment.csv
+    streamlit run dtr/app.py                    # reads data/outputs (change the path in the sidebar)
+
+- **Clock drift** (`dtr/drift.py`): anchors are programs seen by two sources; the median signed gap estimates a
+  source's clock error. The experiment injects a known drift into one source and measures how well the *change*
+  in the estimate recovers it. Natural offsets between sources are reported separately.
+- **Write-up validation** (`dtr/validate.py`, "Write-up validation" page): upload events with times taken from a
+  published case write-up; each is matched to `real_timeline.csv` (the model applied to untampered evidence) and
+  the time error is measured. The documented times must come from the write-up itself.
+- **Review effort**: groups to read to find 90% of tampered groups when ranked by conflict probability versus the
+  expected number if read unranked. It counts groups, not analyst minutes.
